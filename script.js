@@ -5,7 +5,7 @@
  */
 
 // --- Configuration ---
-const JSONBIN_API_KEY = ''$2a$10$kHYd5sOkbctq9YIFMvVr3ei.xNGh9PPLAwFvc28Yg8Na3TWtxD/gG'';
+const JSONBIN_API_KEY = '$2a$10$kHYd5sOkbctq9YIFMvVr3ei.xNGh9PPLAwFvc28Yg8Na3TWtxD/gG';
 const JSONBIN_API_URL = 'https://api.jsonbin.io/v3/b';
 
 // --- State Management ---
