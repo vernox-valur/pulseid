@@ -1,7 +1,12 @@
 /**
- * PulseID MVP Core Logic
- * Pure JavaScript, localStorage persistence, no backend.
+ * PulseID MVP Core Logic - Cloud Edition
+ * Uses JSONBin.io for cloud persistence, localStorage as cache
+ * Enables cross-device profile access via QR code
  */
+
+// --- Configuration ---
+const JSONBIN_API_KEY = API_KEY;
+const JSONBIN_API_URL = 'https://api.jsonbin.io/v3/b';
 
 // --- State Management ---
 const state = {
@@ -11,8 +16,10 @@ const state = {
         emergencyAccess: true,
         plan: 'free'
     },
+    userBinId: localStorage.getItem('pulseid_user_bin_id') || null, // Store bin ID for updates
     view: 'landing', // landing, dashboard, provider, admin
-    adminClicks: 0
+    adminClicks: 0,
+    isLoading: false
 };
 
 // Migrate old single user to users array if needed
@@ -38,16 +45,41 @@ function init() {
     render();
 }
 
-function handleURLParameters() {
+async function handleURLParameters() {
     const urlParams = new URLSearchParams(window.location.search);
-    const id = urlParams.get('id');
-    if (id) {
-        const targetUser = state.users.find(u => u.pid === id);
+    const binId = urlParams.get('bin');
+    const pid = urlParams.get('id');
+
+    // Priority 1: Check for bin ID (cloud-based profile)
+    if (binId) {
+        state.isLoading = true;
+        render();
+        try {
+            const userData = await fetchUserFromCloud(binId);
+            if (userData) {
+                state.user = userData;
+                state.userBinId = binId;
+                state.view = 'provider';
+                // Cache locally for offline access
+                localStorage.setItem('pulseid_user', JSON.stringify(state.user));
+                localStorage.setItem('pulseid_user_bin_id', binId);
+            }
+        } catch (error) {
+            console.error('Error fetching profile from cloud:', error);
+            showError('Failed to load profile. Please try again.');
+        } finally {
+            state.isLoading = false;
+        }
+    }
+    // Priority 2: Check for legacy PID parameter (localStorage-based)
+    else if (pid) {
+        const targetUser = state.users.find(u => u.pid === pid);
         if (targetUser) {
             state.user = targetUser;
             state.view = 'provider';
         }
     }
+    render();
 }
 
 function setupEventListeners() {
@@ -78,29 +110,126 @@ function setView(viewName) {
     window.scrollTo(0, 0);
 }
 
+// --- Cloud API Functions ---
+async function fetchUserFromCloud(binId) {
+    try {
+        const response = await fetch(`${JSONBIN_API_URL}/${binId}/latest`, {
+            method: 'GET',
+            headers: {
+                'X-Master-Key': JSONBIN_API_KEY
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        return result.record || null;
+    } catch (error) {
+        console.error('Error fetching from JSONBin:', error);
+        throw error;
+    }
+}
+
+async function saveUserToCloud(userData) {
+    try {
+        const response = await fetch(JSONBIN_API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Master-Key': JSONBIN_API_KEY,
+                'X-Bin-Name': userData.pid,
+                'X-Bin-Private': 'false' // Allow public read access for emergency scanning
+            },
+            body: JSON.stringify(userData)
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        return result.metadata.id; // Return the bin ID
+    } catch (error) {
+        console.error('Error saving to JSONBin:', error);
+        throw error;
+    }
+}
+
+async function updateUserInCloud(binId, userData) {
+    try {
+        const response = await fetch(`${JSONBIN_API_URL}/${binId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Master-Key': JSONBIN_API_KEY
+            },
+            body: JSON.stringify(userData)
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return await response.json();
+    } catch (error) {
+        console.error('Error updating in JSONBin:', error);
+        throw error;
+    }
+}
+
 // --- Utilities ---
 function generatePID() {
     return 'PID-' + Math.random().toString(36).substr(2, 6).toUpperCase();
 }
 
-function saveUser(userData) {
-    const newUser = {
-        ...userData,
-        pid: state.user?.pid || generatePID(),
-        lastAccessed: new Date().toISOString()
-    };
-    
-    state.user = newUser;
-    const existingIndex = state.users.findIndex(u => u.pid === newUser.pid);
-    if (existingIndex >= 0) {
-        state.users[existingIndex] = newUser;
-    } else {
-        state.users.push(newUser);
-    }
-    
-    localStorage.setItem('pulseid_user', JSON.stringify(state.user));
-    localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
+function showError(message) {
+    alert(message); // Simple error display; can be enhanced with toast notifications
+}
+
+async function saveUser(userData) {
+    state.isLoading = true;
     render();
+
+    try {
+        const newUser = {
+            ...userData,
+            pid: state.user?.pid || generatePID(),
+            lastAccessed: new Date().toISOString()
+        };
+        
+        let binId = state.userBinId;
+
+        // If this is a new user or no bin ID exists, create a new bin
+        if (!binId) {
+            binId = await saveUserToCloud(newUser);
+            state.userBinId = binId;
+            localStorage.setItem('pulseid_user_bin_id', binId);
+        } else {
+            // Update existing bin
+            await updateUserInCloud(binId, newUser);
+        }
+
+        state.user = newUser;
+        const existingIndex = state.users.findIndex(u => u.pid === newUser.pid);
+        if (existingIndex >= 0) {
+            state.users[existingIndex] = newUser;
+        } else {
+            state.users.push(newUser);
+        }
+        
+        // Cache locally
+        localStorage.setItem('pulseid_user', JSON.stringify(state.user));
+        localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
+        
+        render();
+    } catch (error) {
+        console.error('Error saving user:', error);
+        showError('Failed to save profile. Please try again.');
+    } finally {
+        state.isLoading = false;
+    }
 }
 
 function updateSettings(newSettings) {
@@ -115,6 +244,21 @@ function render() {
     elements.landing.classList.add('hidden');
     elements.dashboard.classList.add('hidden');
     elements.provider.classList.add('hidden');
+
+    // Show loading state if needed
+    if (state.isLoading) {
+        elements.dashboard.classList.remove('hidden');
+        const container = document.getElementById('dashboard-content');
+        container.innerHTML = `
+            <div class="text-center py-20">
+                <div class="inline-block">
+                    <div class="spinner"></div>
+                    <p class="mt-4 text-slate-500 font-medium">Loading profile...</p>
+                </div>
+            </div>
+        `;
+        return;
+    }
 
     if (state.view === 'landing') {
         elements.landing.classList.remove('hidden');
@@ -190,6 +334,7 @@ function renderDashboard() {
                             <div>
                                 <h2 class="text-2xl font-bold text-slate-900">${state.user.name}</h2>
                                 <p class="text-red-600 font-mono font-bold">${state.user.pid}</p>
+                                <p class="text-xs text-slate-500 mt-1">Cloud-backed profile (Bin ID: ${state.userBinId ? state.userBinId.substring(0, 8) + '...' : 'local'})</p>
                             </div>
                             <button id="edit-profile-btn" class="text-slate-400 hover:text-red-600 transition-colors">
                                 <i class="fas fa-edit text-xl"></i>
@@ -226,8 +371,8 @@ function renderDashboard() {
                         <h3 class="text-lg font-bold mb-4">Security & Access</h3>
                         <div class="flex items-center justify-between py-4 border-b border-slate-100">
                             <div>
-                                <p class="font-bold">Allow Emergency Access</p>
-                                <p class="text-sm text-slate-500">Enable scanning without login in emergencies</p>
+                                <p class="font-medium text-slate-900">Emergency Access</p>
+                                <p class="text-sm text-slate-500">Allow first responders to view your profile</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="access-toggle" class="sr-only peer" ${state.settings.emergencyAccess ? 'checked' : ''}>
@@ -273,9 +418,9 @@ function renderDashboard() {
             </div>
         `;
 
-        // Generate QR Code with a real URL (simulated for demo)
+        // Generate QR Code with cloud-based URL
         const currentURL = window.location.origin + window.location.pathname;
-        const scanURL = `${currentURL}?id=${state.user.pid}`;
+        const scanURL = `${currentURL}?bin=${state.userBinId}`;
         
         // Ensure the QR code container is empty before generating
         const qrContainer = document.getElementById("qrcode");
@@ -503,68 +648,7 @@ function adminDeleteUser(pid) {
         if (state.user && state.user.pid === pid) {
             state.user = null;
             localStorage.removeItem('pulseid_user');
-        }
-        renderAdmin();
-    }
-}
-
-function renderAdmin() {
-    const container = document.getElementById('dashboard-content');
-    container.innerHTML = `
-        <div class="fade-in space-y-8">
-            <div class="flex justify-between items-center">
-                <h2 class="text-3xl font-bold text-slate-900">Admin Panel: User Management</h2>
-                <button onclick="setView('dashboard')" class="bg-slate-200 hover:bg-slate-300 px-4 py-2 rounded-lg font-bold transition-colors">Back to Dashboard</button>
-            </div>
-            
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <table class="min-w-full divide-y divide-slate-200">
-                    <thead class="bg-slate-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">User</th>
-                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">PID</th>
-                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Blood</th>
-                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-slate-200">
-                        ${state.users.map(u => `
-                            <tr>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-bold text-slate-900">${u.name}</div>
-                                    <div class="text-xs text-slate-500">${u.emergencyContact}</div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap font-mono text-sm text-red-600">${u.pid}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-500">${u.bloodGroup}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-3">
-                                    <button onclick="adminViewUser('${u.pid}')" class="text-blue-600 hover:text-blue-900">View</button>
-                                    <button onclick="adminDeleteUser('${u.pid}')" class="text-red-600 hover:text-red-900">Delete</button>
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-                ${state.users.length === 0 ? '<div class="p-8 text-center text-slate-500">No users found in localStorage.</div>' : ''}
-            </div>
-        </div>
-    `;
-}
-
-function adminViewUser(pid) {
-    const target = state.users.find(u => u.pid === pid);
-    if (target) {
-        state.user = target;
-        setView('provider');
-    }
-}
-
-function adminDeleteUser(pid) {
-    if (confirm(`Are you sure you want to delete user ${pid}?`)) {
-        state.users = state.users.filter(u => u.pid !== pid);
-        localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
-        if (state.user && state.user.pid === pid) {
-            state.user = null;
-            localStorage.removeItem('pulseid_user');
+            localStorage.removeItem('pulseid_user_bin_id');
         }
         renderAdmin();
     }
