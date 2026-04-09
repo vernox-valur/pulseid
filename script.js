@@ -6,12 +6,20 @@
 // --- State Management ---
 const state = {
     user: JSON.parse(localStorage.getItem('pulseid_user')) || null,
+    users: JSON.parse(localStorage.getItem('pulseid_all_users')) || [],
     settings: JSON.parse(localStorage.getItem('pulseid_settings')) || {
         emergencyAccess: true,
         plan: 'free'
     },
-    view: 'landing' // landing, dashboard, provider
+    view: 'landing', // landing, dashboard, provider, admin
+    adminClicks: 0
 };
+
+// Migrate old single user to users array if needed
+if (state.user && !state.users.find(u => u.pid === state.user.pid)) {
+    state.users.push(state.user);
+    localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
+}
 
 // --- DOM Elements ---
 const elements = {
@@ -33,15 +41,35 @@ function init() {
 function handleURLParameters() {
     const urlParams = new URLSearchParams(window.location.search);
     const id = urlParams.get('id');
-    if (id && state.user && state.user.pid === id) {
-        state.view = 'provider';
+    if (id) {
+        const targetUser = state.users.find(u => u.pid === id);
+        if (targetUser) {
+            state.user = targetUser;
+            state.view = 'provider';
+        }
     }
 }
 
 function setupEventListeners() {
     elements.navDemoBtn.addEventListener('click', () => setView('dashboard'));
     elements.heroCtaBtn.addEventListener('click', () => setView('dashboard'));
-    elements.logoLink.addEventListener('click', () => setView('landing'));
+    
+    // Logo link with admin secret gesture
+    elements.logoLink.addEventListener('click', (e) => {
+        state.adminClicks++;
+        if (state.adminClicks === 5) {
+            state.adminClicks = 0;
+            const pin = prompt("Enter Admin PIN:");
+            if (pin === "0000") {
+                setView('admin');
+            } else {
+                setView('landing');
+            }
+        } else {
+            setTimeout(() => { state.adminClicks = 0; }, 3000);
+            setView('landing');
+        }
+    });
 }
 
 function setView(viewName) {
@@ -56,12 +84,22 @@ function generatePID() {
 }
 
 function saveUser(userData) {
-    state.user = {
+    const newUser = {
         ...userData,
         pid: state.user?.pid || generatePID(),
         lastAccessed: new Date().toISOString()
     };
+    
+    state.user = newUser;
+    const existingIndex = state.users.findIndex(u => u.pid === newUser.pid);
+    if (existingIndex >= 0) {
+        state.users[existingIndex] = newUser;
+    } else {
+        state.users.push(newUser);
+    }
+    
     localStorage.setItem('pulseid_user', JSON.stringify(state.user));
+    localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
     render();
 }
 
@@ -86,6 +124,9 @@ function render() {
     } else if (state.view === 'provider') {
         elements.provider.classList.remove('hidden');
         renderProvider();
+    } else if (state.view === 'admin') {
+        elements.dashboard.classList.remove('hidden');
+        renderAdmin();
     }
 }
 
@@ -233,10 +274,14 @@ function renderDashboard() {
         `;
 
         // Generate QR Code with a real URL (simulated for demo)
-        const currentURL = window.location.href.split('?')[0];
+        const currentURL = window.location.origin + window.location.pathname;
         const scanURL = `${currentURL}?id=${state.user.pid}`;
         
-        new QRCode(document.getElementById("qrcode"), {
+        // Ensure the QR code container is empty before generating
+        const qrContainer = document.getElementById("qrcode");
+        qrContainer.innerHTML = '';
+        
+        new QRCode(qrContainer, {
             text: scanURL,
             width: 180,
             height: 180,
@@ -371,7 +416,7 @@ function renderProvider() {
                             <p class="text-2xl font-bold">${state.user.emergencyContact.split(':')[0]}</p>
                             <p class="text-blue-100 text-lg">${state.user.emergencyContact.split(':')[1] || ''}</p>
                         </div>
-                        <a href="tel:${state.user.emergencyContact.split(':')[1] ? state.user.emergencyContact.split(':')[1].replace(/\\s/g, '') : ''}" class="w-14 h-14 bg-white text-blue-600 rounded-full flex items-center justify-center text-2xl shadow-lg hover:scale-105 transition-transform">
+                        <a href="tel:${state.user.emergencyContact.includes(':') ? state.user.emergencyContact.split(':')[1].replace(/\s/g, '') : state.user.emergencyContact.replace(/\s/g, '')}" class="w-14 h-14 bg-white text-blue-600 rounded-full flex items-center justify-center text-2xl shadow-lg hover:scale-105 transition-transform">
                             <i class="fas fa-phone"></i>
                         </a>
                     </div>
@@ -401,8 +446,135 @@ function renderProvider() {
     `;
 }
 
+function renderAdmin() {
+    const container = document.getElementById('dashboard-content');
+    container.innerHTML = `
+        <div class="fade-in space-y-8">
+            <div class="flex justify-between items-center">
+                <h2 class="text-3xl font-bold text-slate-900">Admin Panel: User Management</h2>
+                <button onclick="setView('dashboard')" class="bg-slate-200 hover:bg-slate-300 px-4 py-2 rounded-lg font-bold transition-colors">Back to Dashboard</button>
+            </div>
+            
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <table class="min-w-full divide-y divide-slate-200">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">User</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">PID</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Blood</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-slate-200">
+                        ${state.users.map(u => `
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-bold text-slate-900">${u.name}</div>
+                                    <div class="text-xs text-slate-500">${u.emergencyContact}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap font-mono text-sm text-red-600">${u.pid}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-500">${u.bloodGroup}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-3">
+                                    <button onclick="adminViewUser('${u.pid}')" class="text-blue-600 hover:text-blue-900">View</button>
+                                    <button onclick="adminDeleteUser('${u.pid}')" class="text-red-600 hover:text-red-900">Delete</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                ${state.users.length === 0 ? '<div class="p-8 text-center text-slate-500">No users found in localStorage.</div>' : ''}
+            </div>
+        </div>
+    `;
+}
+
+function adminViewUser(pid) {
+    const target = state.users.find(u => u.pid === pid);
+    if (target) {
+        state.user = target;
+        setView('provider');
+    }
+}
+
+function adminDeleteUser(pid) {
+    if (confirm(`Are you sure you want to delete user ${pid}?`)) {
+        state.users = state.users.filter(u => u.pid !== pid);
+        localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
+        if (state.user && state.user.pid === pid) {
+            state.user = null;
+            localStorage.removeItem('pulseid_user');
+        }
+        renderAdmin();
+    }
+}
+
+function renderAdmin() {
+    const container = document.getElementById('dashboard-content');
+    container.innerHTML = `
+        <div class="fade-in space-y-8">
+            <div class="flex justify-between items-center">
+                <h2 class="text-3xl font-bold text-slate-900">Admin Panel: User Management</h2>
+                <button onclick="setView('dashboard')" class="bg-slate-200 hover:bg-slate-300 px-4 py-2 rounded-lg font-bold transition-colors">Back to Dashboard</button>
+            </div>
+            
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <table class="min-w-full divide-y divide-slate-200">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">User</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">PID</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Blood</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-slate-200">
+                        ${state.users.map(u => `
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm font-bold text-slate-900">${u.name}</div>
+                                    <div class="text-xs text-slate-500">${u.emergencyContact}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap font-mono text-sm text-red-600">${u.pid}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-500">${u.bloodGroup}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-3">
+                                    <button onclick="adminViewUser('${u.pid}')" class="text-blue-600 hover:text-blue-900">View</button>
+                                    <button onclick="adminDeleteUser('${u.pid}')" class="text-red-600 hover:text-red-900">Delete</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                ${state.users.length === 0 ? '<div class="p-8 text-center text-slate-500">No users found in localStorage.</div>' : ''}
+            </div>
+        </div>
+    `;
+}
+
+function adminViewUser(pid) {
+    const target = state.users.find(u => u.pid === pid);
+    if (target) {
+        state.user = target;
+        setView('provider');
+    }
+}
+
+function adminDeleteUser(pid) {
+    if (confirm(`Are you sure you want to delete user ${pid}?`)) {
+        state.users = state.users.filter(u => u.pid !== pid);
+        localStorage.setItem('pulseid_all_users', JSON.stringify(state.users));
+        if (state.user && state.user.pid === pid) {
+            state.user = null;
+            localStorage.removeItem('pulseid_user');
+        }
+        renderAdmin();
+    }
+}
+
 // Make functions globally available for inline event handlers
 window.setView = setView;
+window.adminViewUser = adminViewUser;
+window.adminDeleteUser = adminDeleteUser;
+window.renderAdmin = renderAdmin;
 
 // Start the app
 init();
